@@ -11,6 +11,8 @@ import UIKit
 class PhotosCollectionViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
     
     let cache = Cache<Int, Data>()
+    private let imageFetchQueue = OperationQueue()
+    private var operations = [Int : Operation]()
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -43,6 +45,20 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
         return cell
     }
     
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        
+        if photoReferences.count > 0 {
+            
+            let imageRef = photoReferences[indexPath.item]
+            operations[imageRef.id]?.cancel()
+            
+        } else {
+            for (_, operation) in operations {
+                operation.cancel()
+            }
+        }
+    }
+    
     // Make collection view cells fill as much available width as possible
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
         let flowLayout = collectionViewLayout as! UICollectionViewFlowLayout
@@ -66,38 +82,42 @@ class PhotosCollectionViewController: UIViewController, UICollectionViewDataSour
     
     private func loadImage(forCell cell: ImageCollectionViewCell, forItemAt indexPath: IndexPath) {
         
-        // let photoReference = photoReferences[indexPath.item]
-        
         let photoReference = photoReferences[indexPath.item]
         
-        guard let imageURL = photoReference.imageURL.usingHTTPS else { return }
         
         if let cachedPhoto = cache.value(key: photoReference.id) {
             cell.imageView.image = UIImage(data: cachedPhoto)
             return
         }
         
-        DispatchQueue.main.async {
-            URLSession.shared.dataTask(with: imageURL) { (data, _, error) in
-                if let error = error {
-                    NSLog("Error searching for images: \(error)")
-                    return
-                }
-                
-                if let indexPathC = self.collectionView.indexPath(for: cell),
-                    indexPathC != indexPath {
-                    return
-                }
-                
-                if let data = data {
-                    cell.imageView.image = UIImage(data: data)
-                    self.cache.cache(value: data, key: photoReference.id)
-                }
-                
-            }.resume()
+        let fetchOpertation = FetchPhotoOperation(roverImageReference: photoReference)
+        let cacheOperation = BlockOperation {
+            if let data = fetchOpertation.imageData {
+                self.cache.cache(value: data, key: photoReference.id)
+            }
         }
         
-        // TODO: Implement image loading here
+        let reusedOperations = BlockOperation {
+            if let currentOperation = self.collectionView.indexPath(for: cell),
+                currentOperation != indexPath {
+                return
+            }
+            if let data = fetchOpertation.imageData {
+                cell.imageView.image = UIImage(data: data)
+            }
+        }
+        
+        cacheOperation.addDependency(fetchOpertation)
+        reusedOperations.addDependency(fetchOpertation)
+        
+        imageFetchQueue.addOperation(fetchOpertation)
+        imageFetchQueue.addOperation(cacheOperation)
+        
+        OperationQueue.main.addOperation(reusedOperations)
+        
+        operations[photoReference.id] = fetchOpertation
+        
+
     }
     
     // Properties
